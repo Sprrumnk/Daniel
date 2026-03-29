@@ -70,9 +70,6 @@ MSD_RELEVANCE_FRACTION = 0.15
 VIBRO_JACKSPEED_THRESHOLD = 0.90
 
 DAN_COLORS = {
-    "8th":     "#FFFFFF",
-    "9th":     "#FFFFFF",
-    "10th":    "#FFFFFF",
     "Alpha":   "#ff5a5a",
     "Beta":    "#ffd84d",
     "Gamma":   "#00ffd5",
@@ -84,9 +81,6 @@ DAN_COLORS = {
 }
 
 DAN_MEANS = {
-    "8th":     5.813,
-    "9th":     6.003,
-    "10th":    6.425,
     "Alpha":   6.562,
     "Beta":    6.957,
     "Gamma":   7.459,
@@ -97,7 +91,7 @@ DAN_MEANS = {
     "Theta":   10.782,
 }
 ORDER = list(DAN_MEANS.keys())
-DAN_ORDER_START = 8
+DAN_ORDER_START = 11
 
 
 # --- State ---
@@ -398,9 +392,13 @@ def update_dan_text(dan_label, dan_numeric):
         fill = "#888888"
         new_bar_color = "#333333"
     else:
-        base = dan_label.split()[0].replace("<", "").replace(">", "")
-        fill = DAN_COLORS.get(base, "#FFFFFF")
-        new_bar_color = fill
+        if dan_label.startswith("<"):
+            fill = "#7DF0FF"
+            new_bar_color = fill
+        else:
+            base = dan_label.split()[0]
+            fill = DAN_COLORS.get(base, "#FFFFFF")
+            new_bar_color = fill
 
     bar = draw_accent_bar()
     y_off = _get_text_y_offset()
