@@ -108,6 +108,8 @@ lock = threading.Lock()
 
 current_map = None
 current_mod = "NM"
+current_rate = 1.0
+manual_rate_offset = 0.0
 last_state = None
 current_song_time_ms = 0
 
@@ -188,6 +190,7 @@ canvas = tk.Canvas(root, width=WINDOW_WIDTH, height=FULL_HEIGHT, bg=BG_COLOR, hi
 canvas.pack(expand=True, fill="both")
 
 graph = FastGraph(canvas, GRAPH_HEIGHT, WINDOW_WIDTH)
+rate_var = tk.StringVar(value="Rate: 1.00x")
 
 text_items = []
 msd_items = []
@@ -507,6 +510,22 @@ def cycle_mode(event=None):
 root.bind("<Tab>", cycle_mode)
 
 
+def adjust_manual_rate(delta):
+    global manual_rate_offset, last_state
+    with lock:
+        manual_rate_offset = max(-0.9, min(2.0, manual_rate_offset + delta))
+        last_state = None
+    rate_var.set(f"Rate: {current_rate:.2f}x")
+
+
+rate_label = tk.Label(root, textvariable=rate_var, fg="#FFFFFF", bg=BG_COLOR, font=("Segoe UI", _font_size(10)))
+rate_label.place(x=10, y=8)
+rate_down_btn = tk.Button(root, text="-", width=2, command=lambda: adjust_manual_rate(-0.05))
+rate_down_btn.place(x=120, y=6)
+rate_up_btn = tk.Button(root, text="+", width=2, command=lambda: adjust_manual_rate(0.05))
+rate_up_btn.place(x=150, y=6)
+
+
 # --- Tick loop ---
 
 def _tick():
@@ -530,18 +549,17 @@ def _tick():
             ws_recv = _ws_receive_time
             prev_time = _prev_song_time_ms
             prev_recv = _prev_receive_time
-            md = current_mod
+            map_rate = current_rate
             paused = _paused
             frozen_ms = _frozen_interp_ms
 
         if paused:
-            graph.update_position(frozen_ms, md)
+            graph.update_position(frozen_ms, map_rate)
         else:
-            real_dt = ws_recv - prev_recv
-            rate = (ws_time - prev_time) / real_dt if real_dt > 0.01 and ws_time > prev_time else 1000.0
-            rate = max(0.0, min(rate, 5000.0))
-            interpolated_ms = ws_time + rate * (now - ws_recv)
-            graph.update_position(interpolated_ms, md)
+            ws_rate = (ws_time - prev_time) / (ws_recv - prev_recv) if (ws_recv - prev_recv) > 0.01 and ws_time > prev_time else 1000.0
+            ws_rate = max(0.0, min(ws_rate, 5000.0))
+            interpolated_ms = ws_time + ws_rate * (now - ws_recv)
+            graph.update_position(interpolated_ms, map_rate)
 
     root.after(16, _tick)
 
@@ -557,7 +575,7 @@ def on_open(ws_app):
 
 
 def on_message(ws_app, msg):
-    global current_map, current_mod, current_song_time_ms
+    global current_map, current_mod, current_rate, current_song_time_ms
     global _ws_receive_time, _ws_song_time_ms, _prev_song_time_ms, _prev_receive_time
     global connection_phase, last_state, _last_message_time
     global _paused, _pause_time_ms, _frozen_interp_ms
@@ -584,7 +602,9 @@ def on_message(ws_app, msg):
 
         songs = d["settings"]["folders"]["songs"]
         new_map = os.path.join(songs, folder, file)
-        new_mod = get_rate_mod(read_mods(d))
+        mods = read_mods(d)
+        new_mod = get_rate_mod(mods)
+        new_rate = get_mod_rate(d, mods)
         new_time = bm.get("time", {}).get("current", 0)
         now = time.monotonic()
 
@@ -592,6 +612,7 @@ def on_message(ws_app, msg):
             prev_ws_time = _ws_song_time_ms
             current_map = new_map
             current_mod = new_mod
+            current_rate = max(0.1, new_rate)
             current_song_time_ms = new_time
             _prev_song_time_ms = _ws_song_time_ms
             _prev_receive_time = _ws_receive_time
@@ -618,7 +639,7 @@ def on_message(ws_app, msg):
                 _pause_time_ms = new_time
                 _frozen_interp_ms = float(new_time)
                 print(f"[Pause] Detected at {new_time} ms")
-                root.after(0, lambda t=new_time, m=new_mod: graph.add_pause_marker(t, m))
+                root.after(0, lambda t=new_time, r=current_rate: graph.add_pause_marker(t, r))
 
         else:
             if _paused:
@@ -630,6 +651,7 @@ def on_message(ws_app, msg):
             connection_phase = "ready"
             print("[WS] Map data received. Entering normal operation.")
             root.after(0, _clear_connection_screen)
+        root.after(0, lambda: rate_var.set(f"Rate: {current_rate:.2f}x"))
 
     except Exception:
         pass
@@ -665,6 +687,25 @@ def get_rate_mod(m):
     return "NM"
 
 
+def get_mod_rate(d, mods):
+    base = 1.0
+    for path in (("gameplay", "mods", "speed"), ("menu", "mods", "speed"), ("gameplay", "mods", "rate"), ("menu", "mods", "rate")):
+        node = d
+        for key in path:
+            node = node.get(key, {}) if isinstance(node, dict) else {}
+        if isinstance(node, (int, float)) and node > 0:
+            base = float(node)
+            break
+
+    if base == 1.0:
+        if "DT" in mods or "NC" in mods:
+            base = 1.5
+        elif "HT" in mods:
+            base = 0.75
+
+    return base + manual_rate_offset
+
+
 # --- Calculation loop ---
 
 def calculation_loop():
@@ -678,9 +719,9 @@ def calculation_loop():
             continue
 
         with lock:
-            state = (current_map, current_mod)
+            state = (current_map, round(current_rate, 3))
 
-        mp, mod = state
+        mp, rate = state
 
         if not mp or not os.path.exists(mp):
             time.sleep(0.1)
@@ -700,14 +741,14 @@ def calculation_loop():
             if _p.get_parsed_data()[0] != 4:
                 raise ValueError(f"Not a 4k map (keycount={_p.get_parsed_data()[0]})")
 
-            SR, times, strain, factors = algorithm.calculate(mp, mod)
+            SR, times, strain, factors = algorithm.calculate(mp, rate)
 
             t_arr = np.asarray(times, dtype=float)
             d_arr = np.asarray(strain, dtype=float)
             current_strain_data = (t_arr, d_arr)
 
             try:
-                hitobjects = msd_converter.parse_hitobjects(mp, mod)
+                hitobjects = msd_converter.parse_hitobjects(mp, rate)
                 etterna_rows = msd_converter.osu_to_etterna_rows(hitobjects)
                 msd_result = msd_converter.calculate_msd(etterna_rows)
                 print("\n[MSD Skillsets]")
@@ -726,7 +767,7 @@ def calculation_loop():
             _last_dan_label = dan_label
             _last_dan_numeric = dan_numeric
 
-            print(f"\n[Map Factors] {os.path.basename(mp)} [{mod}]")
+            print(f"\n[Map Factors] {os.path.basename(mp)} [{rate:.2f}x]")
             for k, v in averages.items():
                 print(f"{k:<6}: {v:.4f}")
             print(f"SR    : {SR:.4f}★")
